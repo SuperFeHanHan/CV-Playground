@@ -29,8 +29,10 @@ def classify(data_split, idx, classes, model, preprocess):
 
 
 if __name__ == '__main__':
-    DATA_PATH = "../data/PokemonData"
-    MODEL_PATH = "../models/resnet50-bs=128"  # 存放模型权重的地方
+    ROOT_DIR = os.path.dirname(os.path.dirname(__file__))       # 项目根目录文件夹
+    DATA_PATH = os.path.join(f"{ROOT_DIR}","data","PokemonData")
+    MODEL_PATH =os.path.join(f"{ROOT_DIR}","models","resnet50-bs=128") # 存放模型权重的地方
+
     MODEL_CKPT_NAME = "e=8-s=384-acc=95.59.pth"
 
     set_seed(42) # 和train一致

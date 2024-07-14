@@ -36,10 +36,10 @@ def collate_fn(batch, preprocess):
     return images,labels
 
 def split_data(data_path):
-    classes = sorted([fn for fn in os.listdir(data_path) if fn!=".DS_Store"])
+    classes = sorted([fn for fn in os.listdir(data_path) if ".DS_Store" not in fn and not fn.startswith(".")])
     cnt = {}
     for c in classes:
-        cnt[c] = sorted([fn for fn in os.listdir(f"{data_path}/{c}") if fn!=".DS_Store"])
+        cnt[c] = sorted([fn for fn in os.listdir(os.path.join(f"{data_path}",f"{c}"))  if ".DS_Store" not in fn and not fn.startswith(".")])
 
     # 每类里抽5张作为test
     # train,test : [[img_path, img_class], ...]
@@ -47,7 +47,7 @@ def split_data(data_path):
     for c in classes:
         test_filenames = random.sample(cnt[c],5)
         for i,filename in enumerate(cnt[c]):
-            img_path = f"{data_path}/{c}/{filename}"
+            img_path = os.path.join(data_path,c,filename)
             img_class = c
             if filename in test_filenames:
                 test.append([img_path,img_class])
@@ -82,15 +82,16 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 if __name__ == '__main__':
-    DATA_PATH = "../data/PokemonData"
-    MODEL_PATH = "../models/resnet50" # 存放模型权重的地方
-    EPOCH = 5
-    BATCH_SIZE = 2
-    LOG_FREQ = 100  # 多少个step记录1次log
-    FC_ONLY = False # 是否只训练最顶层的fc
+    ROOT_DIR = os.path.dirname(os.path.dirname(__file__))       # 项目根目录文件夹
+    DATA_PATH = os.path.join(f"{ROOT_DIR}","data","PokemonData")
+    MODEL_PATH =os.path.join(f"{ROOT_DIR}","models","resnet50-bs=128-fc-only") # 存放模型权重的地方
+    EPOCH = 10
+    BATCH_SIZE = 128
+    LOG_FREQ = int(3000/BATCH_SIZE)  # 多少个step记录1次log
+    FC_ONLY = True # 是否只训练最顶层的fc
 
     os.makedirs(MODEL_PATH, exist_ok=True)
-    logger.add("training_log.log", format="{time} {level} {message}", level="INFO")
+    logger.add(os.path.join(MODEL_PATH,"training_log.log"), format="{time} {level} {message}", level="INFO")
     set_seed(42)
 
     # 保存train_split 和 test_split
@@ -107,7 +108,7 @@ if __name__ == '__main__':
     model.device = device
     # 是否只训练最顶上的分类层
     for k, v in model.named_parameters():
-        if FC_ONLY and not v.beginswith("fc."):
+        if FC_ONLY and not k.startswith("fc."):
             v.requires_grad = False
     model.to(device)
     optimizer = Adam(model.parameters(), lr=5e-4)
@@ -146,11 +147,14 @@ if __name__ == '__main__':
                 accuracy = calculate_accuracy(model, test_loader)
                 logger.info(f"Epoch:{epoch}: Step {step}: Training Loss: {loss.item():.4f}, Test Accuracy: {accuracy:.2f}%")
                 if accuracy>best_test_acc:
-                    torch.save(model.state_dict(), f"{MODEL_PATH}/e={epoch}-s={step}-acc={accuracy:.2f}.pth")
+                    best_test_acc = accuracy
+                    print("save to", os.path.join(f"{MODEL_PATH}",f"e={epoch}-s={step}-acc={accuracy:.2f}.pth"))
+                    torch.save(model.state_dict(), os.path.join(f"{MODEL_PATH}",f"e={epoch}-s={step}-acc={accuracy:.2f}.pth"))
 
-        epoch_loss /= len(train_loader)
+        epoch_loss /= len(train_dataset)
 
         accuracy = calculate_accuracy(model, test_loader)
         logger.info(f"Epoch:{epoch}, Epoch Loss {epoch_loss:.2f}, Test Accuracy {accuracy:.2f}%")
         if accuracy > best_test_acc:
-            torch.save(model.state_dict(), f"{MODEL_PATH}/e={epoch}-s={step}-acc={accuracy:.2f}.pth")
+            best_test_acc = accuracy
+            torch.save(model.state_dict(), os.path.join(f"{MODEL_PATH}",f"e={epoch}-s={step}-acc={accuracy:.2f}.pth"))
