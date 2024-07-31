@@ -1,6 +1,7 @@
 from torchvision.models import resnet18, resnet34, resnet50, resnet101, resnet152
 from torchvision.models import ResNet50_Weights
 from torchvision.io import read_image
+import matplotlib.pyplot as plt
 
 def count_parameters(model):
     cnt = 0
@@ -8,6 +9,11 @@ def count_parameters(model):
         cnt += v.numel()
     return cnt
 
+def show_tensor(tensor):
+    # tensor: (3, H, W)
+    tensor = tensor.permute(1, 2, 0)
+    plt.imshow(tensor.cpu().numpy())
+    plt.show()
 
 if __name__ == '__main__':
     # 研究模型参数量
