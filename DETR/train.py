@@ -1,4 +1,5 @@
 # 基于transformers的实现
+# https://github.com/roboflow/notebooks/blob/main/notebooks/train-huggingface-detr-on-custom-dataset.ipynb
 import os, json, fitz, random
 import numpy as np
 from PIL import Image, ImageDraw
@@ -33,7 +34,7 @@ class DocLayNetDataset(Dataset):
         self.data_path = data_path
 
         self.annotation_path = os.path.join(data_path, 'annotations')
-        filenames = [fn for fn in os.listdir(self.annotation_path) if fn.endswith('.json')]
+        filenames = [fn for fn in os.listdir(self.annotation_path) if fn.endswith('.json') and not fn.startswith('.')]
         self.raw_data = []
         self.data = []
         for fn in tqdm(filenames):
@@ -159,7 +160,7 @@ class DocLayNetDataset(Dataset):
             draw.text((bbox[0], bbox[1]-10), text=label, fill=color)
         img.show()
 
-def collate_fn(batch):
+def collate_fn(batch, device='cpu'):
     result = {
         "images": [],      # list of pil image
         "targets": [],     # list of dict
@@ -169,8 +170,8 @@ def collate_fn(batch):
     for item in batch:
         result["images"].append(Image.open(item['image_path']).convert('RGB'))
         result["targets"].append({
-            "class_labels": torch.LongTensor(item['class_labels']),
-            "boxes": torch.tensor(item['boxes'], dtype=torch.float32),
+            "class_labels": torch.LongTensor(item['class_labels']).to(device),
+            "boxes": torch.tensor(item['boxes'], dtype=torch.float32).to(device),
         })
     return result["images"], result["targets"]
 
@@ -190,37 +191,65 @@ if __name__ == '__main__':
     MODEL_PATH = os.path.join(f"{ROOT_DIR}", "models", "detr")
     os.makedirs(MODEL_PATH, exist_ok=True)
 
-    train_dataset = DocLayNetDataset(os.path.join(ROOT_DIR, "data", "DocLayNet", "small_dataset", "train"))
-    val_dataset = DocLayNetDataset(os.path.join(ROOT_DIR, "data", "DocLayNet", "small_dataset", "val"))
-    test_dataset = DocLayNetDataset(os.path.join(ROOT_DIR, "data", "DocLayNet", "small_dataset", "test"))
+    train_dataset = DocLayNetDataset(os.path.join(ROOT_DIR, "data", "DocLayNet", "base_dataset", "train"))
+    val_dataset = DocLayNetDataset(os.path.join(ROOT_DIR, "data", "DocLayNet", "base_dataset", "val"))
+    test_dataset = DocLayNetDataset(os.path.join(ROOT_DIR, "data", "DocLayNet", "base_dataset", "test"))
     # train_dataset.show(123)
     # val_dataset.show(42)
     # test_dataset.show(42)
 
-    # 开训!
-    bs = 4
-    lr = 5e-5
-    EPOCH = 5
-    LOG_FREQ = 10
+    # 开训! 每个step是1个bs，每grad_accumulation更新1次
+    bs = 8 # 8
+    grad_accumulation = 8 # 实际上的bs = grad_accumulation * bs
+    lr = 1e-4
+    lr_backbone = 1e-5 # resnet的lr
+    weight_decay = 1e-4
+    EPOCH = 40
+    LOG_FREQ = 5*grad_accumulation # 枚多少个bs*grad_accumulation log一次
 
     os.makedirs(MODEL_PATH, exist_ok=True)
     logger.add(os.path.join(MODEL_PATH, "training_log.log"), format="{time} {level} {message}", level="INFO")
     set_seed(42)
 
-    train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=True, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=bs, shuffle=True, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, collate_fn=lambda x:collate_fn(x,device=device))
+    val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, collate_fn=lambda x:collate_fn(x,device=device))
+    test_loader = DataLoader(test_dataset, batch_size=bs, shuffle=False, collate_fn=lambda x:collate_fn(x,device=device))
 
     # 为了使用已有的权重
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    '''
     pretrained_config = DetrConfig.from_pretrained('facebook/detr-resnet-50', revision="no_timm")
     # 修改model.config
     # pretrained_config.num_queries = 200  # 如果要修改最大预测的bbox数目
     pretrained_config.label2id = train_dataset.label2id # 新的id -> label
     pretrained_config.id2label = train_dataset.id2label
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = DetrForObjectDetection(pretrained_config)
-    optimizer = AdamW(model.parameters(), lr=lr, eps=1e-8)
+    '''
+    from transformers import DetrForObjectDetection
+
+    model = DetrForObjectDetection.from_pretrained(
+        'facebook/detr-resnet-50',
+        num_labels=len(train_dataset.label2id),
+        id2label=train_dataset.id2label,
+        label2id=train_dataset.label2id,
+        ignore_mismatched_sizes=True, # 比如最后一层的权重, 一开始是92类，现在是12类
+        revision="no_timm"
+    )
+
+    # DETR authors decided to use different learning rate for backbone
+    # you can learn more about it here:
+    # - https://github.com/facebookresearch/detr/blob/3af9fa878e73b6894ce3596450a8d9b89d918ca9/main.py#L22-L23
+    # - https://github.com/facebookresearch/detr/blob/3af9fa878e73b6894ce3596450a8d9b89d918ca9/main.py#L131-L139
+    param_dicts = [
+        {
+            "params": [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad]},
+        {
+            "params": [p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad],
+            "lr": lr_backbone,
+        },
+    ]
+    optimizer =AdamW(param_dicts, lr=lr, weight_decay=weight_decay)
     model.to(device)
     processor = DetrImageProcessor.from_pretrained('facebook/detr-resnet-50', revision="no_timm")
 
@@ -231,26 +260,40 @@ if __name__ == '__main__':
         epoch_loss = 0.0
         num_samples = 0
         model.train()
+        optimizer.zero_grad()
+
         for images, targets in train_loader:
             # list of pil image
             # list of dict, dict需要包含下面2个key
             # "class_labels": torch.LongTensor (list of bbox's labels)
             # "boxes": torch.tensor (list of bbox's labels)
-            inputs = processor(images=images, return_tensors="pt")  # pixel_values, pixel_mask(全是1)
+
+            inputs = processor(images=images, return_tensors="pt").to(device)  # pixel_values, pixel_mask(全是1)
             outputs = model(**inputs, labels=targets)
             loss = outputs.loss
             loss.backward()
-            optimizer.step()
 
             step += 1
+            if step % grad_accumulation==0:
+                optimizer.step()
+                optimizer.zero_grad()
+
             epoch_loss += loss.item() * len(images) # bs = len(images)
             num_samples += len(images)
             if step % LOG_FREQ == 0:
                 logger.info(
                     f"Epoch:{epoch}: Step {step}: Training Loss: {loss.item():.4f}")
-                print("save to", os.path.join(f"{MODEL_PATH}", f"e={epoch}-s={step}-batch_loss={loss.item():.2f}.pth"))
+                # print("save to", os.path.join(f"{MODEL_PATH}", f"e={epoch}-s={step}-batch_loss={loss.item():.2f}.pth"))
+                # torch.save(model.state_dict(),
+                #            os.path.join(f"{MODEL_PATH}", f"e={epoch}-s={step}-batch_loss={loss.item():.2f}.pth"))
+            if step % 375 == 0:
+                # 每过3000个batch保存1次结果
                 torch.save(model.state_dict(),
                            os.path.join(f"{MODEL_PATH}", f"e={epoch}-s={step}-batch_loss={loss.item():.2f}.pth"))
+        if step % grad_accumulation != 0:
+            # 如果没能整除 -> 单独更新1次。
+            optimizer.step()
+            optimizer.zero_grad()
 
         epoch_loss /= num_samples
 
